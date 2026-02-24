@@ -1,0 +1,25 @@
+# requirements.txt
+# DeepSeek-Replica dependencies
+
+# Core deep learning
+torch>=2.1.0
+
+# Optional but recommended
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# HuggingFace (optional - for using the official DeepSeek tokenizer)
+transformers>=4.40.0
+huggingface_hub>=0.20.0
+sentencepiece>=0.1.99
+
+# Weights & Biases (optional - for experiment tracking)
+# wandb>=0.16.0
+
+# Flash Attention (optional, for faster training on A100/H100)
+# flash-attn>=2.5.0
+
+# Development
+pytest>=7.4.0
+black>=23.0.0
+isort>=5.12.0
