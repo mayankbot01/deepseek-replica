@@ -1,6 +1,5 @@
 # model/transformer.py
 # Full DeepSeek-style transformer: decoder layers + LM head
-
 from typing import List, Optional, Tuple
 
 import torch
@@ -14,7 +13,6 @@ from .moe import MoELayer, DenseMLP
 # ---------------------------------------------------------------------------
 # RMSNorm
 # ---------------------------------------------------------------------------
-
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization."""
 
@@ -33,22 +31,19 @@ class RMSNorm(nn.Module):
 # ---------------------------------------------------------------------------
 # Decoder Layer
 # ---------------------------------------------------------------------------
-
 class DeepSeekDecoderLayer(nn.Module):
     """
     Single transformer decoder block:
-        x -> LN -> MLA -> residual
-        x -> LN -> MoE (or Dense MLP) -> residual
+      x -> LN -> MLA -> residual
+      x -> LN -> MoE (or Dense MLP) -> residual
     """
 
     def __init__(self, config: DeepSeekConfig, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
-
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.self_attn = MultiHeadLatentAttention(config, layer_idx=layer_idx)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
         # Use dense FFN for the first layer and every non-MoE layer
         use_moe = config.use_moe and layer_idx > 0
         if use_moe:
@@ -64,6 +59,8 @@ class DeepSeekDecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value=None,
         use_cache: bool = False,
+        # FIX: propagate is_causal flag down to MultiHeadLatentAttention
+        is_causal: bool = True,
     ):
         # ----- Self-Attention -----
         residual = hidden_states
@@ -74,6 +71,7 @@ class DeepSeekDecoderLayer(nn.Module):
             position_ids=position_ids,
             past_key_value=past_key_value,
             use_cache=use_cache,
+            is_causal=is_causal,  # FIX: was not passed before
         )
         hidden_states = residual + attn_out
 
@@ -86,21 +84,21 @@ class DeepSeekDecoderLayer(nn.Module):
             mlp_out = self.mlp(hidden_states)
             aux_loss = torch.tensor(0.0, device=hidden_states.device)
         hidden_states = residual + mlp_out
-
         return hidden_states, aux_loss, present_kv
 
 
 # ---------------------------------------------------------------------------
 # Full Model
 # ---------------------------------------------------------------------------
-
 class DeepSeekModel(nn.Module):
     """Decoder-only transformer body (without LM head)."""
 
     def __init__(self, config: DeepSeekConfig):
         super().__init__()
         self.config = config
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
+        )
         self.layers = nn.ModuleList([
             DeepSeekDecoderLayer(config, layer_idx=i)
             for i in range(config.num_hidden_layers)
@@ -118,11 +116,9 @@ class DeepSeekModel(nn.Module):
         B, T = input_ids.shape
         hidden_states = self.embed_tokens(input_ids)  # (B, T, D)
 
-        # Build causal mask if not provided
-        if attention_mask is None:
-            # PyTorch SDPA expects (B, 1, T, T) or None
-            attention_mask = None  # SDPA handles causal internally via is_causal
-
+        # FIX: is_causal=True is now threaded through all layers.
+        # When decoding with a KV cache (T==1) each layer sets sdpa_is_causal=False
+        # because past_key_value is provided -- that's correct behaviour.
         past_key_values = past_key_values or [None] * len(self.layers)
         new_kv_cache: List = []
         total_aux_loss = torch.tensor(0.0, device=hidden_states.device)
@@ -134,6 +130,7 @@ class DeepSeekModel(nn.Module):
                 position_ids=position_ids,
                 past_key_value=past_key_values[i],
                 use_cache=use_cache,
+                is_causal=True,  # FIX: always pass is_causal=True
             )
             total_aux_loss = total_aux_loss + aux_loss
             new_kv_cache.append(present_kv)
@@ -150,11 +147,9 @@ class DeepSeekForCausalLM(nn.Module):
         self.config = config
         self.model = DeepSeekModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
         # Weight tying
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -181,7 +176,6 @@ class DeepSeekForCausalLM(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
-
         logits = self.lm_head(hidden_states)  # (B, T, vocab_size)
 
         loss = None
@@ -243,7 +237,6 @@ class DeepSeekForCausalLM(nn.Module):
             probs = next_logits.softmax(dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=-1)
-
             if (next_token == eos_token_id).all():
                 break
 
