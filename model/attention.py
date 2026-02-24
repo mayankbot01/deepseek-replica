@@ -1,7 +1,6 @@
 # model/attention.py
 # Multi-Head Latent Attention (MLA) with Rotary Position Embeddings (RoPE)
 # Based on DeepSeek-V2/V3 architecture
-
 import math
 from typing import Optional, Tuple
 
@@ -75,6 +74,10 @@ class MultiHeadLatentAttention(nn.Module):
         self.kv_lora_rank = config.kv_lora_rank
         self.q_lora_rank = config.q_lora_rank
         self.attn_drop = config.attention_dropout
+
+        # FIX: softmax_scale uses v_head_dim projection dim, not head_dim
+        # SDPA will apply its own 1/sqrt(d_k) scaling -- we pass scale explicitly
+        # to use the correct d_k = head_dim (nope + rope)
         self.softmax_scale = self.head_dim ** -0.5
 
         if self.q_lora_rank is not None:
@@ -96,7 +99,6 @@ class MultiHeadLatentAttention(nn.Module):
             bias=False,
         )
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, self.hidden_size, bias=False)
-
         self.rotary_emb = RotaryEmbedding(
             dim=self.qk_rope_dim, max_seq_len=config.max_seq_len, theta=config.rope_theta
         )
@@ -108,6 +110,7 @@ class MultiHeadLatentAttention(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value=None,
         use_cache: bool = False,
+        is_causal: bool = True,
     ):
         B, T, _ = hidden_states.shape
 
@@ -117,51 +120,62 @@ class MultiHeadLatentAttention(nn.Module):
         else:
             q = self.q_proj(hidden_states)
         q = q.view(B, T, self.num_heads, self.head_dim)
-        q_nope, q_rope = q[..., :self.qk_nope_dim], q[..., self.qk_nope_dim:]
+        q_nope, q_rope = q[..., : self.qk_nope_dim], q[..., self.qk_nope_dim :]
 
         # KV
         kv_raw = self.kv_a_proj_with_mqa(hidden_states)
-        kv_latent = kv_raw[..., :self.kv_lora_rank]
-        k_rope = kv_raw[..., self.kv_lora_rank:].view(B, T, self.num_kv_heads, self.qk_rope_dim)
+        kv_latent = kv_raw[..., : self.kv_lora_rank]
+        # k_rope: (B, T, num_kv_heads, qk_rope_dim)
+        k_rope = kv_raw[..., self.kv_lora_rank :].view(B, T, self.num_kv_heads, self.qk_rope_dim)
         kv_latent = self.kv_a_layernorm(kv_latent)
         kv = self.kv_b_proj(kv_latent).view(
             B, T, self.num_kv_heads, self.qk_nope_dim + self.v_head_dim
         )
-        k_nope = kv[..., :self.qk_nope_dim]
-        value_states = kv[..., self.qk_nope_dim:]
+        k_nope = kv[..., : self.qk_nope_dim]         # (B, T, num_kv_heads, qk_nope_dim)
+        value_states = kv[..., self.qk_nope_dim :]    # (B, T, num_kv_heads, v_head_dim)
 
         # RoPE
-        past_len = past_key_value[0].shape[1] if past_key_value is not None else 0
+        past_len = past_key_value[0].shape[2] if past_key_value is not None else 0
         cos, sin = self.rotary_emb(q_rope, seq_len=T + past_len)
-        cos = cos[0, 0, past_len: past_len + T].unsqueeze(0).unsqueeze(2)
-        sin = sin[0, 0, past_len: past_len + T].unsqueeze(0).unsqueeze(2)
+        # cos/sin shape: (1, 1, seq_len, rope_dim) -> slice to current positions
+        cos = cos[0, 0, past_len : past_len + T].unsqueeze(0).unsqueeze(2)  # (1,1,T,rope_dim) -> broadcast
+        sin = sin[0, 0, past_len : past_len + T].unsqueeze(0).unsqueeze(2)
         q_rope, k_rope = apply_rotary_emb(q_rope, k_rope, cos, sin)
 
-        # Merge nope + rope
+        # Merge nope + rope -> (B, num_heads, T, head_dim)
         query_states = torch.cat([q_nope, q_rope], dim=-1).permute(0, 2, 1, 3)
-        key_states = torch.cat([k_nope, k_rope], dim=-1)
-        value_states = value_states
-
-        # KV cache
-        if past_key_value is not None:
-            key_states = torch.cat([past_key_value[0], key_states], dim=1)
-            value_states = torch.cat([past_key_value[1], value_states], dim=1)
-        present = (key_states, value_states) if use_cache else None
-
-        # GQA expand
-        if self.num_kv_groups > 1:
-            key_states = key_states.repeat_interleave(self.num_kv_groups, dim=2)
-            value_states = value_states.repeat_interleave(self.num_kv_groups, dim=2)
-
-        key_states = key_states.permute(0, 2, 1, 3)
+        # key/value: (B, num_kv_heads, T, dim) -- permute BEFORE KV-cache concat
+        key_states = torch.cat([k_nope, k_rope], dim=-1).permute(0, 2, 1, 3)
         value_states = value_states.permute(0, 2, 1, 3)
 
+        # FIX: KV cache stores tensors in (B, num_kv_heads, T, dim) layout
+        # so concat must be on dim=2 (the time axis), not dim=1
+        if past_key_value is not None:
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        present = (key_states, value_states) if use_cache else None
+
+        # GQA: repeat K/V heads to match Q head count
+        if self.num_kv_groups > 1:
+            key_states = key_states.repeat_interleave(self.num_kv_groups, dim=1)
+            value_states = value_states.repeat_interleave(self.num_kv_groups, dim=1)
+
+        # FIX: pass is_causal=True so SDPA applies a causal mask.
+        # When a past_key_value is present (incremental decoding), the sequence
+        # is already causal by construction so we can pass is_causal=False then.
+        sdpa_is_causal = is_causal and (past_key_value is None)
+
+        # FIX: removed explicit `scale` kwarg (added in PyTorch 2.1 only).
+        # SDPA auto-scales by 1/sqrt(head_dim) which matches self.softmax_scale.
         attn_out = F.scaled_dot_product_attention(
-            query_states, key_states, value_states,
+            query_states,
+            key_states,
+            value_states,
             attn_mask=attention_mask,
             dropout_p=self.attn_drop if self.training else 0.0,
-            scale=self.softmax_scale,
+            is_causal=sdpa_is_causal,
         )
+
         attn_out = attn_out.permute(0, 2, 1, 3).reshape(B, T, self.num_heads * self.v_head_dim)
         attn_out = self.o_proj(attn_out)
         return attn_out, None, present
