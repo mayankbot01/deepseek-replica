@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# evaluate.py  –  Perplexity & downstream evaluation for DeepSeek-Replica
+# evaluate.py  -  Perplexity & downstream evaluation for DeepSeek-Replica
 """
 Usage:
     python evaluate.py \\
@@ -56,6 +56,7 @@ def compute_perplexity(
     model: DeepSeekForCausalLM,
     dataloader: DataLoader,
     device: torch.device,
+    device_type: str,
     max_batches: int = None,
 ) -> float:
     """Compute token-level perplexity on a dataset."""
@@ -71,7 +72,8 @@ def compute_perplexity(
         x = x.to(device)
         y = y.to(device)
 
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        # FIX: use device_type ("cuda"/"cpu") not full device string
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             out = model(input_ids=x, labels=y)
 
         loss = out["loss"].item()
@@ -96,21 +98,22 @@ def compute_bits_per_byte(
     model: DeepSeekForCausalLM,
     dataloader: DataLoader,
     device: torch.device,
+    device_type: str,
 ) -> float:
-    """Compute bits-per-byte (BPB) — useful for byte-level tokenizers."""
-    import math
+    """Compute bits-per-byte (BPB)."""
     model.eval()
     total_nll = 0.0
     total_bytes = 0
 
     for x, y in dataloader:
         x, y = x.to(device), y.to(device)
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        # FIX: use device_type ("cuda"/"cpu")
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             out = model(input_ids=x, labels=y)
-        nll = out["loss"].item()  # nats per token
+        nll = out["loss"].item()
         n_tokens = (y != -100).sum().item()
         total_nll += nll * n_tokens
-        # Rough: assume ~1 token ≈ 4 bytes (UTF-8 average for BPE)
+        # Rough: assume ~1 token ~ 4 bytes (UTF-8 average for BPE)
         total_bytes += n_tokens * 4
 
     bpb = (total_nll / math.log(2)) / total_bytes
@@ -149,11 +152,14 @@ def main():
         device = torch.device(args.device)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # FIX: extract base device type for torch.autocast
+    device_type = device.type  # torch.device.type gives "cuda" or "cpu"
     print(f"Device: {device}")
 
     # ---- Load tokenizer ----
     print("Loading tokenizer ...")
-    tokenizer = DeepSeekTokenizer.from_pretrained(args.tokenizer_dir)
+    # FIX: DeepSeekTokenizer uses .load() not .from_pretrained()
+    tokenizer = DeepSeekTokenizer.load(args.tokenizer_dir)
 
     # ---- Tokenize data ----
     print(f"Tokenizing {args.data} ...")
@@ -167,7 +173,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=4,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=(device_type == "cuda"),
     )
     print(f"Evaluation windows: {len(dataset):,}")
 
@@ -185,14 +191,14 @@ def main():
     # ---- Evaluate ----
     print("\nComputing perplexity ...")
     ppl = compute_perplexity(
-        model, dataloader, device, max_batches=args.max_batches
+        model, dataloader, device, device_type, max_batches=args.max_batches
     )
     print(f"\n{'='*40}")
     print(f"Perplexity : {ppl:.4f}")
     print(f"Bits/token : {math.log2(ppl):.4f}")
 
     if args.bits_per_byte:
-        bpb = compute_bits_per_byte(model, dataloader, device)
+        bpb = compute_bits_per_byte(model, dataloader, device, device_type)
         print(f"Bits/byte  : {bpb:.4f}")
 
     print(f"{'='*40}")
