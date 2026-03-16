@@ -99,16 +99,22 @@ class JsonlDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        # FIX #8: Ensure EOS token is always present even after truncation
+        # Encode without EOS first, truncate to leave space, then add EOS manually
         ids = self.tokenizer.encode(
             self.records[idx],
             add_bos=(self.mode == "pretrain"),
-            add_eos=(self.mode == "pretrain"),
-            max_length=self.seq_len + 1,
+            add_eos=False,  # Don't add EOS yet - will add after truncation
+            max_length=self.seq_len,  # Leave space for EOS
         )
-        # Pad or truncate to seq_len + 1
+        # Now add EOS if in pretrain mode (after potential truncation)
+        if self.mode == "pretrain":
+            ids.append(self.tokenizer.eos_token_id)
+        # Pad or truncate to exactly seq_len + 1
         if len(ids) < self.seq_len + 1:
             ids = ids + [self.tokenizer.pad_token_id] * (self.seq_len + 1 - len(ids))
-        return {
+        elif len(ids) > self.seq_len + 1:
+            ids = ids[:self.seq_len + 1]        return {
             "input_ids": torch.tensor(ids[:-1], dtype=torch.long),
             "labels":    torch.tensor(ids[1:],  dtype=torch.long),
         }
