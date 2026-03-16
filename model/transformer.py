@@ -147,10 +147,12 @@ class DeepSeekForCausalLM(nn.Module):
         self.config = config
         self.model = DeepSeekModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        # Weight tying
+        self.apply(self._init_weights)
+
+            # FIX #6: Move weight tying AFTER _init_weights to prevent re-initialization
+        # Weight tying must happen after all parameters are initialized
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-        self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -230,8 +232,9 @@ class DeepSeekForCausalLM(nn.Module):
             if top_p < 1.0:
                 sorted_logits, sorted_idx = torch.sort(next_logits, descending=True)
                 cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-                remove = cumulative_probs - sorted_logits.softmax(dim=-1) > top_p
-                sorted_logits[remove] = float("-inf")
+            # FIX #2: Standard nucleus sampling - keep tokens until cumsum > top_p
+            remove = cumulative_probs > top_p
+            remove[..., 0] = False  # Always keep at least the top-1 token                sorted_logits[remove] = float("-inf")
                 next_logits.scatter_(1, sorted_idx, sorted_logits)
 
             probs = next_logits.softmax(dim=-1)
