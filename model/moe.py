@@ -136,9 +136,9 @@ class MoELayer(nn.Module):
         topk_weights, topk_indices, aux_loss = self.gate(flat)  # (N, K)
 
         # ----- Dispatch to routed experts -----
-        # We use a simple loop for clarity; production implementations
-        # use grouped GEMM / triton kernels.
-        expert_output = torch.zeros_like(flat)  # (N, D)
+        # FIX #11: Current O(K×E) loop dispatch is slow for large num_experts
+        # TODO: Replace with grouped GEMM or expert-parallel batching for production
+        # Current implementation: simple but launches many kernels (K×E iterations)        expert_output = torch.zeros_like(flat)  # (N, D)
 
         # Transpose for expert-centric iteration: (K, N)
         for k in range(self.top_k):
