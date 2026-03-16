@@ -138,9 +138,12 @@ class MultiHeadLatentAttention(nn.Module):
         past_len = past_key_value[0].shape[2] if past_key_value is not None else 0
         cos, sin = self.rotary_emb(q_rope, seq_len=T + past_len)
         # cos/sin shape: (1, 1, seq_len, rope_dim) -> slice to current positions
-        cos = cos[0, 0, past_len : past_len + T].unsqueeze(0).unsqueeze(2)  # (1,1,T,rope_dim) -> broadcast
-        sin = sin[0, 0, past_len : past_len + T].unsqueeze(0).unsqueeze(2)
-        q_rope, k_rope = apply_rotary_emb(q_rope, k_rope, cos, sin)
+        # FIX #1: Correct RoPE broadcast shape from (1,1,T,D) to (1,T,1,D)
+        # to properly broadcast over (B,T,H,D) where H is num_heads dimension
+        cos = cos[0, 0, past_len : past_len + T]  # (T, rope_dim)
+        sin = sin[0, 0, past_len : past_len + T]  # (T, rope_dim)
+        cos = cos.unsqueeze(0).unsqueeze(2)  # (1, T, 1, rope_dim) -> broadcasts over (B, T, H, D)
+        sin = sin.unsqueeze(0).unsqueeze(2)  # (1, T, 1, rope_dim)        q_rope, k_rope = apply_rotary_emb(q_rope, k_rope, cos, sin)
 
         # Merge nope + rope -> (B, num_heads, T, head_dim)
         query_states = torch.cat([q_nope, q_rope], dim=-1).permute(0, 2, 1, 3)
