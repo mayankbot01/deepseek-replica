@@ -54,6 +54,10 @@ class DeepSeekConfig:
     tie_word_embeddings: bool = False
     use_cache: bool = True
 
+    # FIX #3: Added @property decorator so config.head_dim returns an int,
+    # not a bound-method object. Previously calling config.head_dim (without
+    # parentheses) would silently return the function, causing wrong values.
+    @property
     def head_dim(self) -> int:
         """Total head dimension (nope + rope)."""
         return self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -74,21 +78,35 @@ def get_config(size: str = "small") -> DeepSeekConfig:
     """Return a pre-defined config by size name."""
     configs = {
         "tiny": DeepSeekConfig(
-            hidden_size=512, num_hidden_layers=8,
-            num_attention_heads=8, num_key_value_heads=8,
-            intermediate_size=2048, num_experts=8,
-            num_experts_per_tok=2, moe_intermediate_size=512,
-            kv_lora_rank=128, q_lora_rank=256,
-            qk_rope_head_dim=32, qk_nope_head_dim=32, v_head_dim=32,
+            hidden_size=512,
+            num_hidden_layers=8,
+            num_attention_heads=8,
+            num_key_value_heads=8,
+            intermediate_size=2048,
+            num_experts=8,
+            num_experts_per_tok=2,
+            moe_intermediate_size=512,
+            kv_lora_rank=128,
+            q_lora_rank=256,
+            qk_rope_head_dim=32,
+            qk_nope_head_dim=32,
+            v_head_dim=32,
         ),
-        "small": DeepSeekConfig(),   # 2B-class defaults above
+        "small": DeepSeekConfig(),  # 2B-class defaults above
         "medium": DeepSeekConfig(
-            hidden_size=4096, num_hidden_layers=30,
-            num_attention_heads=32, num_key_value_heads=32,
-            intermediate_size=14336, num_experts=64,
-            num_experts_per_tok=6, moe_intermediate_size=1408,
-            kv_lora_rank=512, q_lora_rank=1536,
-            qk_rope_head_dim=64, qk_nope_head_dim=128, v_head_dim=128,
+            hidden_size=4096,
+            num_hidden_layers=30,
+            num_attention_heads=32,
+            num_key_value_heads=32,
+            intermediate_size=14336,
+            num_experts=64,
+            num_experts_per_tok=6,
+            moe_intermediate_size=1408,
+            kv_lora_rank=512,
+            q_lora_rank=1536,
+            qk_rope_head_dim=64,
+            qk_nope_head_dim=128,
+            v_head_dim=128,
         ),
     }
     if size not in configs:
