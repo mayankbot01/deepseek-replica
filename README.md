@@ -1,8 +1,7 @@
 # DeepSeek-Replica
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![PyTorch 2.1+](https://img.shields.io/badge/pytorch-2.1+-orange.svg)](https://pytorch.org)
+
 
 A **from-scratch** Python replica of the DeepSeek large language model architecture, built purely with PyTorch — no Hugging Face model code. This repo implements every major architectural innovation from the DeepSeek-V2/V3 technical reports.
 
